@@ -12,11 +12,10 @@ Automatically pushes tomorrow's schedule + weather to your LINE at 20:00 every n
 
 ## What it does
 
-**20:00 — Two-day preview**
+**20:00 — Three-day preview**
 - Tomorrow's Google Calendar events, each with real-time rainfall probability and weather emoji
 - Outdoor events (detected by location field or keywords) show weather for that specific location
-- Day-after full-day rainfall at 6 time slots (06/09/12/15/18/21)
-- Automatic umbrella reminder
+- Day-after and two-days-out: one summary line each (max rainfall + emoji), same format as weekly forecast
 
 **05:00 — Today reminder**
 - Same format as the 20:00 message, for the current day
@@ -54,16 +53,8 @@ Automatically pushes tomorrow's schedule + weather to your LINE at 20:00 every n
 ☂️ 晚上降雨率高，出門記得帶傘
 
 ══════════
-📅 後天 6/19（四）
-🌡 中正區
-06☀️
-09☀️
-12⛅
-15⛅
-18☁️
-21🌦25%
-──────────
-出門不用帶傘 ✅
+6/19（四）☀️
+6/20（五）🌧 45%
 ```
 
 ---

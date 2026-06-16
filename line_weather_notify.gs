@@ -1,7 +1,7 @@
 // LINE Weather Reminder — Google Apps Script
-// v1.9.0
+// v1.10.0
 // Sends daily LINE messages with schedule + weather from Taiwan CWA API
-// Three modes: 20:00 two-day preview, 05:00 today reminder, Sunday 20:00 weekly forecast
+// Three modes: 20:00 three-day compact preview, 05:00 today reminder, Sunday 20:00 weekly forecast
 // Self-scheduling triggers (.at()), accuracy ±1 minute
 
 // ─────────────────────────────────────────────
@@ -166,7 +166,7 @@ function wxToEmoji(wx) {
 
 // ── Entry: 20:00 — tomorrow schedule + weather, plus day-after weather preview ──
 function notifyEvening() {
-  Logger.log('=== LINE Weather Reminder v1.9.0 notifyEvening START ===');
+  Logger.log('=== LINE Weather Reminder v1.10.0 notifyEvening START ===');
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'notifyEvening')
     .forEach(t => ScriptApp.deleteTrigger(t));
@@ -184,10 +184,12 @@ function notifyEvening() {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const dayAfter = new Date();
   dayAfter.setDate(dayAfter.getDate() + 2);
+  const dayAfterAfter = new Date();
+  dayAfterAfter.setDate(dayAfterAfter.getDate() + 3);
 
   const tomorrowLines = buildDayPreviewLines(apiKey, tomorrow, '🌙 明日預覽');
-  const dayAfterLines = buildWeatherOnlyLines(apiKey, dayAfter);
-  const combined      = tomorrowLines.concat(['', '══════════'], dayAfterLines).join('\n');
+  const dayAfterLines = buildWeatherOnlyLines(apiKey, [dayAfter, dayAfterAfter]);
+  const combined = tomorrowLines.concat(['', '══════════'], dayAfterLines).join('\n');
 
   sendLineMessage(lineToken, lineUserId, combined);
   Logger.log('notifyEvening sent two-day preview');
@@ -201,14 +203,14 @@ function notifyEvening() {
 
 // ── Entry: 05:00 — today schedule reminder ──
 function notifyMorning() {
-  Logger.log('=== LINE Weather Reminder v1.9.0 notifyMorning START ===');
+  Logger.log('=== LINE Weather Reminder v1.10.0 notifyMorning START ===');
   runNotify(new Date(), '☀️ 今日提醒');
   scheduleNextTrigger('notifyMorning', 5, 0);
 }
 
 // ── Entry: Sunday 20:00 — 7-day rainfall forecast ──
 function notifyWeekly() {
-  Logger.log('=== LINE Weather Reminder v1.9.0 notifyWeekly START ===');
+  Logger.log('=== LINE Weather Reminder v1.10.0 notifyWeekly START ===');
   runWeeklyForecast();
   scheduleNextWeeklyTrigger();
 }
@@ -346,17 +348,26 @@ function buildDayPreviewLines(apiKey, targetDate, label) {
 }
 
 // ── Build weather-only lines for day-after (no schedule) ──
-function buildWeatherOnlyLines(apiKey, targetDate) {
-  const dateStr    = Utilities.formatDate(targetDate, 'Asia/Taipei', 'yyyy-MM-dd');
-  const dayMap     = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
-  const dayEn      = Utilities.formatDate(targetDate, 'Asia/Taipei', 'EEE');
-  const displayStr = Utilities.formatDate(targetDate, 'Asia/Taipei', 'M/d') + '（' + (dayMap[dayEn] || dayEn) + '）';
-
-  const weather = fetchWeatherBySlot(apiKey, dateStr, DEFAULT_COUNTY, DEFAULT_DISTRICT);
-  const lines   = ['📅 後天 ' + displayStr, '🌡 ' + DEFAULT_DISTRICT, buildHomeWeatherSummary(weather)];
-  lines.push('──────────');
-  lines.push(buildHomePeriodUmbrella(weather));
-  return lines;
+// dates: Date[] — returns one compact line per day (weekly-style: M/d（週X）emoji%)
+function buildWeatherOnlyLines(apiKey, dates) {
+  const dayMap = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
+  const daily  = fetchWeeklyForecast(apiKey, DEFAULT_COUNTY, DEFAULT_DISTRICT);
+  return dates.map(date => {
+    const dateStr    = Utilities.formatDate(date, 'Asia/Taipei', 'yyyy-MM-dd');
+    const dayEn      = Utilities.formatDate(date, 'Asia/Taipei', 'EEE');
+    const displayStr = Utilities.formatDate(date, 'Asia/Taipei', 'M/d') + '（' + (dayMap[dayEn] || dayEn) + '）';
+    const info       = daily[dateStr];
+    let entry;
+    if (!info) {
+      entry = '—';
+    } else {
+      const { maxPop, wx } = info;
+      if (maxPop > 30)      entry = '🌧 ' + maxPop + '%';
+      else if (maxPop > 15) entry = '🌦 ' + maxPop + '%';
+      else                  entry = (wxToEmoji(wx) || '☀️');
+    }
+    return displayStr + entry;
+  });
 }
 
 // ── Build umbrella reminder based on home district rainfall ──

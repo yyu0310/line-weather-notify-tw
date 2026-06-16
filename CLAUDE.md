@@ -9,7 +9,7 @@ A Google Apps Script that sends daily LINE messages combining Google Calendar ev
 ## Architecture
 
 ```
-notifyEvening()  → buildDayPreviewLines(tomorrow) + buildWeatherOnlyLines(dayAfter) → combined LINE message
+notifyEvening()  → buildDayPreviewLines(tomorrow) + buildWeatherOnlyLines([dayAfter, dayAfterAfter]) → combined LINE message
 notifyMorning()  → runNotify(today) → buildDayPreviewLines(today) → LINE message
 notifyWeekly()   → runWeeklyForecast() → fetchWeeklyForecast() → LINE message
 ```
@@ -21,7 +21,7 @@ Each entry function deletes its own trigger first, does its work, then schedules
 | Function | Purpose |
 |---|---|
 | `buildDayPreviewLines(apiKey, date, label)` | Returns string[] with full schedule + per-event weather. Used by both notifyEvening and notifyMorning. |
-| `buildWeatherOnlyLines(apiKey, date)` | Returns string[] with weather-only block (no schedule). Used for day-after section in notifyEvening. |
+| `buildWeatherOnlyLines(apiKey, dates)` | Returns string[] with one compact line per day (weekly-style). `dates` is `[{date, label}, ...]`. Used for day-after/two-days-out section in notifyEvening. Calls `fetchWeeklyForecast` internally. |
 | `buildHomePeriodUmbrella(weather)` | Returns a single umbrella reminder string based on home district rainfall. |
 | `fetchWeatherBySlot(apiKey, dateStr, county, district)` | Calls CWA 3-day/3-hour dataset. Returns `{pop: {hour: value}, wx: {hour: value}}`. |
 | `fetchWeeklyForecast(apiKey, county, district)` | Calls CWA 7-day/12-hour dataset (3-day ID + 2). Returns `{yyyy-MM-dd: {maxPop, wx}}`. |
