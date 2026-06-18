@@ -1,4 +1,4 @@
-# CLAUDE.md — line-weather-notify
+# AGENTS.md
 
 This file is for AI assistants (Claude Code, Cursor, etc.) to understand the project before making changes.
 
