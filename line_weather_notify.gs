@@ -1,51 +1,27 @@
-// LINE Weather Reminder — Google Apps Script
-// v1.10.0
-// Sends daily LINE messages with schedule + weather from Taiwan CWA API
-// Three modes: 20:00 three-day compact preview, 05:00 today reminder, Sunday 20:00 weekly forecast
-// Self-scheduling triggers (.at()), accuracy ±1 minute
-
-// ─────────────────────────────────────────────
-//  REQUIRED SETUP: Script Properties
-//  GAS Editor → Project Settings (gear icon) → Script Properties
-//
-//  Required:
-//    CWA_API_KEY         — Taiwan CWA open data API key
-//    LINE_CHANNEL_TOKEN  — LINE Messaging API Channel Access Token
-//    LINE_USER_ID        — LINE User ID to receive messages
-//    CALENDAR_ID         — Your Google Calendar ID (usually your Gmail address)
-//
-//  Optional (override defaults):
-//    DEFAULT_COUNTY      — e.g. 臺北市 (default)
-//    DEFAULT_DISTRICT    — e.g. 中正區 (default)
-//
-//  See README.md for step-by-step instructions to get each credential.
-// ─────────────────────────────────────────────
-
-const _props = PropertiesService.getScriptProperties();
-
-const DEFAULT_COUNTY   = _props.getProperty('DEFAULT_COUNTY')   || '臺北市';
-const DEFAULT_DISTRICT = _props.getProperty('DEFAULT_DISTRICT') || '中正區';
-const CALENDAR_ID      = _props.getProperty('CALENDAR_ID')      || '';
+// 日程天氣提醒 — LINE Messaging API
+// v1.11.0
+// 20:00 明日行程天氣推播 + 後天・大後天精簡預覽；05:00 當天行程提醒；週日 20:00 本週 7 天降雨預告
+// 自排觸發器（.at()），精準度 ±1 分鐘
 
 const OUTDOOR_KEYWORDS = [
-  // Sports
+  // 運動
   '跑步', '跑', '晨跑', '健跑', '慢跑', '騎車', '騎行', '單車', '腳踏車',
   '游泳', '籃球', '羽毛球', '羽球', '排球', '匹克球', '網球', '桌球',
   '運動', '健身', '爬山', '健行', '散步',
-  // Dining & social
+  // 飲食社交
   '吃飯', '午餐', '晚餐', '早餐', '咖啡', '餐廳', '聚餐', '飯局', '下午茶', '聚',
-  // Shopping
+  // 採買
   '市場', '採買', '採購', 'Costco', 'costco',
-  // Medical
+  // 醫療出行
   '回診', '門診', '看診', '醫院',
-  // Visits & outings
+  // 外出拜訪
   '拜訪', '見面', '外出', '出門', '參觀', '參加', '出差', '學長',
-  // Events
+  // 活動演出
   '活動', '演講', '論壇', '展覽', '演唱會', '演唱', '比賽', '典禮', '婚禮', '喜宴',
   '入場', '專場', '看展',
 ];
 
-// Taiwan counties → CWA township weather dataset IDs (3-day / 3-hour rainfall)
+// 台灣各縣市 → CWA 鄉鎮天氣預報 Dataset ID（3天/3小時降雨機率版本）
 const COUNTY_TO_DATASET = {
   '宜蘭縣': 'F-D0047-001',
   '桃園市': 'F-D0047-005',
@@ -71,7 +47,7 @@ const COUNTY_TO_DATASET = {
   '金門縣': 'F-D0047-085',
 };
 
-// Input county name → CWA canonical county name (handles simplified / traditional variants)
+// 輸入縣市名 → CWA 標準縣市名（含簡稱/台/臺混用）
 const COUNTY_ALIASES = {
   '台北': '臺北市', '臺北': '臺北市', '台北市': '臺北市', '臺北市': '臺北市',
   '新北': '新北市', '新北市': '新北市',
@@ -95,7 +71,7 @@ const COUNTY_ALIASES = {
   '連江': '連江縣', '馬祖': '連江縣',
 };
 
-// Default township when only county is known
+// 只知道縣市、沒有具體鄉鎮時的預設查詢區
 const COUNTY_DEFAULT_DISTRICT = {
   '臺北市': '中正區', '新北市': '板橋區', '桃園市': '桃園區',
   '臺中市': '西區',   '臺南市': '中西區', '高雄市': '前金區',
@@ -107,31 +83,37 @@ const COUNTY_DEFAULT_DISTRICT = {
   '連江縣': '南竿鄉',
 };
 
+const _props           = PropertiesService.getScriptProperties();
+const DEFAULT_COUNTY   = _props.getProperty('DEFAULT_COUNTY')   || '臺北市';
+const DEFAULT_DISTRICT = _props.getProperty('DEFAULT_DISTRICT') || '文山區';
+const CALENDAR_ID      = _props.getProperty('CALENDAR_ID');
+
 function isOutdoor(event) {
   if (event.getLocation()) return true;
   const title = event.getTitle();
   return OUTDOOR_KEYWORDS.some(kw => title.includes(kw));
 }
 
-// Parse a location string, return {county, district, label} or null.
-// Uses string indexOf (not regex) to avoid partial match issues like 「台灣臺北市」→「灣臺北市」
+// 從字串解析地點，回傳 {county, district, label} 或 null
+// label 為 null 表示使用預設，不在訊息顯示標籤
+// 注意：不用 regex 匹配縣市，避免「台灣臺北市」被誤匹配為「灣臺北市」
 function parseLocation(text) {
   if (!text) return null;
 
   const sortedAliases = Object.entries(COUNTY_ALIASES).sort((a, b) => b[0].length - a[0].length);
 
-  // Pass 1: county + district together (e.g. 臺北市文山區)
+  // Pass 1：找「已知縣市名 + 緊接的鄉鎮市區」（如「臺北市文山區」）
   for (const [alias, county] of sortedAliases) {
     const idx = text.indexOf(alias);
     if (idx === -1) continue;
-    const afterCounty   = text.slice(idx + alias.length);
-    const districtMatch = afterCounty.match(/^([^\s]{1,4}[區鄉鎮市])/);
+    const afterCounty    = text.slice(idx + alias.length);
+    const districtMatch  = afterCounty.match(/^([^\s]{1,4}[區鄉鎮市])/);
     if (districtMatch && COUNTY_TO_DATASET[county]) {
       return { county, district: districtMatch[1], label: county + districtMatch[1] };
     }
   }
 
-  // Pass 2: county only (e.g. 台南行) → use county default district
+  // Pass 2：只找到縣市名（如「台南行」），用該縣市預設鄉鎮
   for (const [alias, county] of sortedAliases) {
     if (text.includes(alias)) {
       const district = COUNTY_DEFAULT_DISTRICT[county];
@@ -142,7 +124,7 @@ function parseLocation(text) {
   return null;
 }
 
-// Get weather query location for an event: location field → title → DEFAULT_DISTRICT
+// 取得事件的天氣查詢地點：location 欄位 → 標題 → 預設文山區
 function getWeatherLocation(event) {
   const fromLocation = parseLocation(event.getLocation());
   if (fromLocation) return fromLocation;
@@ -153,7 +135,7 @@ function getWeatherLocation(event) {
   return { county: DEFAULT_COUNTY, district: DEFAULT_DISTRICT, label: null };
 }
 
-// Weather description string → emoji (rain already handled by pop; this covers non-rain conditions)
+// 天氣現象字串 → emoji（雨況已由 pop 處理，這裡只處理非雨天）
 function wxToEmoji(wx) {
   if (!wx) return '';
   if (wx.includes('雨') || wx.includes('雷')) return '';
@@ -164,58 +146,66 @@ function wxToEmoji(wx) {
   return '';
 }
 
-// ── Entry: 20:00 — tomorrow schedule + weather, plus day-after weather preview ──
+// ── 入口函式：每日 20:00 推播明日行程天氣 + 後天純天氣預覽 ──
 function notifyEvening() {
-  Logger.log('=== LINE Weather Reminder v1.10.0 notifyEvening START ===');
+  Logger.log('=== 日程天氣提醒 v1.11.0 notifyEvening START ===');
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'notifyEvening')
     .forEach(t => ScriptApp.deleteTrigger(t));
 
-  const lineToken  = _props.getProperty('LINE_CHANNEL_TOKEN');
-  const lineUserId = _props.getProperty('LINE_USER_ID');
-  const apiKey     = _props.getProperty('CWA_API_KEY');
+  const lineToken  = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_TOKEN');
+  const lineUserId = PropertiesService.getScriptProperties().getProperty('LINE_USER_ID');
+  const apiKey     = PropertiesService.getScriptProperties().getProperty('CWA_API_KEY');
 
   if (!lineToken || !lineUserId || !apiKey) {
-    Logger.log('Missing required Script Properties. See README for setup instructions.');
+    Logger.log('=== 日程天氣提醒 v1.11.0 === 缺少 LINE_CHANNEL_TOKEN、LINE_USER_ID 或 CWA_API_KEY');
     return;
   }
 
-  const tomorrow = new Date();
+  const tomorrow    = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = Utilities.formatDate(tomorrow, 'Asia/Taipei', 'yyyy-MM-dd');
+  const dayMap      = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
+  const dayEn       = Utilities.formatDate(tomorrow, 'Asia/Taipei', 'EEE');
+  const tomorrowDisplay = Utilities.formatDate(tomorrow, 'Asia/Taipei', 'M/d') + '（' + (dayMap[dayEn] || dayEn) + '）';
+
   const dayAfter = new Date();
   dayAfter.setDate(dayAfter.getDate() + 2);
   const dayAfterAfter = new Date();
   dayAfterAfter.setDate(dayAfterAfter.getDate() + 3);
 
-  const tomorrowLines = buildDayPreviewLines(apiKey, tomorrow, '🌙 明日預覽');
-  const dayAfterLines = buildWeatherOnlyLines(apiKey, [dayAfter, dayAfterAfter]);
+  const daily          = fetchWeeklyForecast(apiKey, DEFAULT_COUNTY, DEFAULT_DISTRICT);
+  const tomorrowExtras = daily[tomorrowStr] || {};
+  const tomorrowLines  = buildDayPreviewLines(apiKey, tomorrow, '🌙 明日預覽', tomorrowExtras);
+  const dayAfterLines  = buildWeatherOnlyLines(apiKey, [dayAfter, dayAfterAfter], daily);
   const combined = tomorrowLines.concat(['', '══════════'], dayAfterLines).join('\n');
 
   sendLineMessage(lineToken, lineUserId, combined);
-  Logger.log('notifyEvening sent two-day preview');
+  Logger.log('notifyEvening 已推播兩日預覽');
 
   const next = new Date();
   next.setDate(next.getDate() + 1);
   next.setHours(20, 0, 0, 0);
   ScriptApp.newTrigger('notifyEvening').timeBased().at(next).create();
-  Logger.log('Next notifyEvening scheduled: ' + next);
+  Logger.log('下次 notifyEvening 已排定：' + next);
 }
 
-// ── Entry: 05:00 — today schedule reminder ──
+
+// ── 入口函式：05:00 推播當天提醒 ──────────────────────────────
 function notifyMorning() {
-  Logger.log('=== LINE Weather Reminder v1.10.0 notifyMorning START ===');
+  Logger.log('=== 日程天氣提醒 v1.11.0 notifyMorning START ===');
   runNotify(new Date(), '☀️ 今日提醒');
   scheduleNextTrigger('notifyMorning', 5, 0);
 }
 
-// ── Entry: Sunday 20:00 — 7-day rainfall forecast ──
+// ── 入口函式：週日 20:00 推播本週 7 天降雨預告 ─────────────────
 function notifyWeekly() {
-  Logger.log('=== LINE Weather Reminder v1.10.0 notifyWeekly START ===');
+  Logger.log('=== 日程天氣提醒 v1.11.0 notifyWeekly START ===');
   runWeeklyForecast();
   scheduleNextWeeklyTrigger();
 }
 
-// ── Self-scheduling: reschedule same function for tomorrow ──
+// ── 自排觸發器：結束後排定下一次執行（每日）──────────────────────
 function scheduleNextTrigger(fnName, hour, minute) {
   minute = (minute === undefined) ? 0 : minute;
   ScriptApp.getProjectTriggers()
@@ -225,11 +215,16 @@ function scheduleNextTrigger(fnName, hour, minute) {
   const next = new Date();
   next.setDate(next.getDate() + 1);
   next.setHours(hour, minute, 0, 0);
-  ScriptApp.newTrigger(fnName).timeBased().at(next).create();
-  Logger.log('Next ' + fnName + ' scheduled: ' + next);
+
+  ScriptApp.newTrigger(fnName)
+    .timeBased()
+    .at(next)
+    .create();
+
+  Logger.log('下次 ' + fnName + ' 已排定：' + next);
 }
 
-// ── Self-scheduling: reschedule notifyWeekly for next Sunday 20:00 ──
+// ── 自排觸發器：結束後排定下一個週日 20:00 ───────────────────────
 function scheduleNextWeeklyTrigger() {
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'notifyWeekly')
@@ -239,32 +234,41 @@ function scheduleNextWeeklyTrigger() {
   const daysUntilSunday = (7 - next.getDay()) % 7 || 7;
   next.setDate(next.getDate() + daysUntilSunday);
   next.setHours(20, 0, 0, 0);
-  ScriptApp.newTrigger('notifyWeekly').timeBased().at(next).create();
-  Logger.log('Next notifyWeekly scheduled: ' + next);
+
+  ScriptApp.newTrigger('notifyWeekly')
+    .timeBased()
+    .at(next)
+    .create();
+
+  Logger.log('下次 notifyWeekly 已排定：' + next);
 }
 
-// ── Sends a single-day preview (used by notifyMorning) ──
+// ── runNotify：發送單日預覽（供 notifyMorning 呼叫）───────────────
 function runNotify(targetDate, label) {
-  const lineToken  = _props.getProperty('LINE_CHANNEL_TOKEN');
-  const lineUserId = _props.getProperty('LINE_USER_ID');
-  const apiKey     = _props.getProperty('CWA_API_KEY');
+  const lineToken  = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_TOKEN');
+  const lineUserId = PropertiesService.getScriptProperties().getProperty('LINE_USER_ID');
+  const apiKey     = PropertiesService.getScriptProperties().getProperty('CWA_API_KEY');
 
   if (!lineToken || !lineUserId || !apiKey) {
-    Logger.log('Missing required Script Properties. See README for setup instructions.');
+    Logger.log('=== 日程天氣提醒 v1.11.0 === 缺少 LINE_CHANNEL_TOKEN、LINE_USER_ID 或 CWA_API_KEY');
     return;
   }
 
-  const lines = buildDayPreviewLines(apiKey, targetDate, label);
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Taipei', 'yyyy-MM-dd');
+  const daily   = fetchWeeklyForecast(apiKey, DEFAULT_COUNTY, DEFAULT_DISTRICT);
+  const extras  = daily[dateStr] || {};
+  const lines   = buildDayPreviewLines(apiKey, targetDate, label, extras);
   sendLineMessage(lineToken, lineUserId, lines.join('\n'));
 
   const dayMap        = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
   const dayEn         = Utilities.formatDate(targetDate, 'Asia/Taipei', 'EEE');
   const targetDisplay = Utilities.formatDate(targetDate, 'Asia/Taipei', 'M/d') + '（' + (dayMap[dayEn] || dayEn) + '）';
-  Logger.log('Sent preview for: ' + targetDisplay);
+  Logger.log('已推播：' + targetDisplay);
 }
 
-// ── Build full single-day preview lines (schedule + per-event weather) ──
-function buildDayPreviewLines(apiKey, targetDate, label) {
+// ── buildDayPreviewLines：單日完整預覽（含行程），供 runNotify / notifyEvening 使用 ──
+function buildDayPreviewLines(apiKey, targetDate, label, extras) {
+  extras = extras || {};
   const targetStr     = Utilities.formatDate(targetDate, 'Asia/Taipei', 'yyyy-MM-dd');
   const dayMap        = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
   const dayEn         = Utilities.formatDate(targetDate, 'Asia/Taipei', 'EEE');
@@ -272,9 +276,22 @@ function buildDayPreviewLines(apiKey, targetDate, label) {
   const targetStart   = new Date(targetStr + 'T00:00:00+08:00');
   const targetEnd     = new Date(targetStr + 'T23:59:59+08:00');
 
+  // 永遠抓文山區天氣，作為每日天氣總覽的基礎
   const homeWeather = fetchWeatherBySlot(apiKey, targetStr, DEFAULT_COUNTY, DEFAULT_DISTRICT);
   const homeSummary = buildHomeWeatherSummary(homeWeather);
-  const headerLines = [label, '🌡 ' + DEFAULT_DISTRICT, homeSummary];
+
+  const headerLines = [label, '🏠 ' + DEFAULT_DISTRICT];
+  if (extras.uvIndex != null) {
+    headerLines.push('🔆 UV ' + extras.uvIndex + ' ' + (extras.uvExposureLevel || '') + ' ' + uvAdvice(extras.uvIndex));
+  }
+  if (extras.minFeelsLike != null && extras.maxFeelsLike != null) {
+    headerLines.push('🌡 體感 ' + extras.minFeelsLike + '–' + extras.maxFeelsLike + '°C');
+  } else if (extras.maxFeelsLike != null) {
+    headerLines.push('🌡 體感最高 ' + extras.maxFeelsLike + '°C');
+  } else if (extras.minFeelsLike != null) {
+    headerLines.push('🌡 體感最低 ' + extras.minFeelsLike + '°C');
+  }
+  headerLines.push(homeSummary);
 
   const calendar = CalendarApp.getCalendarById(CALENDAR_ID);
   const events = calendar.getEvents(targetStart, targetEnd)
@@ -288,7 +305,7 @@ function buildDayPreviewLines(apiKey, targetDate, label) {
     return headerLines.concat(['', '🗓️ ' + targetDisplay + ' 無行程', '──────────', buildHomePeriodUmbrella(homeWeather)]);
   }
 
-  // Weather cache to avoid duplicate API calls for the same location
+  // 預先建立天氣快取（key = county|district，避免相同地點重複打 API）
   const weatherCache = {};
   weatherCache[DEFAULT_COUNTY + '|' + DEFAULT_DISTRICT] = homeWeather;
   events.forEach(event => {
@@ -347,11 +364,11 @@ function buildDayPreviewLines(apiKey, targetDate, label) {
   return lines;
 }
 
-// ── Build weather-only lines for day-after (no schedule) ──
-// dates: Date[] — returns one compact line per day (weekly-style: M/d（週X）emoji%)
-function buildWeatherOnlyLines(apiKey, dates) {
+// ── buildWeatherOnlyLines：後天・大後天精簡預覽（weekly 同款單行格式，不含行程）──
+// dates: Date[]
+function buildWeatherOnlyLines(apiKey, dates, preloadedDaily) {
   const dayMap = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
-  const daily  = fetchWeeklyForecast(apiKey, DEFAULT_COUNTY, DEFAULT_DISTRICT);
+  const daily  = preloadedDaily || fetchWeeklyForecast(apiKey, DEFAULT_COUNTY, DEFAULT_DISTRICT);
   return dates.map(date => {
     const dateStr    = Utilities.formatDate(date, 'Asia/Taipei', 'yyyy-MM-dd');
     const dayEn      = Utilities.formatDate(date, 'Asia/Taipei', 'EEE');
@@ -370,7 +387,7 @@ function buildWeatherOnlyLines(apiKey, dates) {
   });
 }
 
-// ── Build umbrella reminder based on home district rainfall ──
+// ── buildHomePeriodUmbrella：根據文山區全日降雨率判斷帶傘提醒 ──
 function buildHomePeriodUmbrella(weather) {
   const HOUR_TO_PERIOD = { 6: '早上', 9: '早上', 12: '下午', 15: '下午', 18: '晚上', 21: '晚上' };
   const homeRainHours  = [6, 9, 12, 15, 18, 21].filter(h => {
@@ -384,7 +401,7 @@ function buildHomePeriodUmbrella(weather) {
     : '出門不用帶傘 ✅';
 }
 
-// Full-day weather summary for home district (06–21, every 3 hours)
+// 文山區全日時段天氣總覽（06~21 每 3 小時一格）
 function buildHomeWeatherSummary(weather) {
   const slots = [6, 9, 12, 15, 18, 21];
   return slots.map(hour => {
@@ -396,14 +413,13 @@ function buildHomeWeatherSummary(weather) {
     return label + (wxEmoji || '—');
   }).join('\n');
 }
-
-// ── Weekly 7-day rainfall forecast (Sunday 20:00) ──
+// ── 本週 7 天降雨預告（週日 20:05 推播）─────────────────────────
 function runWeeklyForecast() {
-  const lineToken  = _props.getProperty('LINE_CHANNEL_TOKEN');
-  const lineUserId = _props.getProperty('LINE_USER_ID');
-  const apiKey     = _props.getProperty('CWA_API_KEY');
+  const lineToken  = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_TOKEN');
+  const lineUserId = PropertiesService.getScriptProperties().getProperty('LINE_USER_ID');
+  const apiKey     = PropertiesService.getScriptProperties().getProperty('CWA_API_KEY');
   if (!lineToken || !lineUserId || !apiKey) {
-    Logger.log('notifyWeekly: missing required Script Properties');
+    Logger.log('notifyWeekly: 缺少必要設定');
     return;
   }
 
@@ -419,7 +435,10 @@ function runWeeklyForecast() {
     const dayZh      = dayMap[Utilities.formatDate(d, 'Asia/Taipei', 'EEE')] || '';
 
     const info = daily[dateStr];
-    if (!info) { lines.push(displayStr + '（' + dayZh + '）—'); continue; }
+    if (!info) {
+      lines.push(displayStr + '（' + dayZh + '）—');
+      continue;
+    }
 
     const { maxPop, wx } = info;
     let entry;
@@ -431,11 +450,19 @@ function runWeeklyForecast() {
   }
 
   sendLineMessage(lineToken, lineUserId, lines.join('\n'));
-  Logger.log('Sent weekly rainfall forecast');
+  Logger.log('已推播本週降雨預告');
 }
 
-// Fetch 7-day forecast (12-hour slots, datasetId = 3-day ID + 2)
-// Returns { 'yyyy-MM-dd': { maxPop: number, wx: string|null } }
+function uvAdvice(idx) {
+  if (idx <= 2)  return '不需防護';
+  if (idx <= 5)  return '帽子、防曬乳';
+  if (idx <= 7)  return '戶外活動需防護';
+  if (idx <= 10) return '10點後避暴曬';
+  return '避免戶外';
+}
+
+// 抓 7 天預報（逐 12 小時版，datasetId = 3 天版 +2）
+// 回傳 { 'yyyy-MM-dd': { maxPop, wx, maxFeelsLike, minFeelsLike, uvIndex } }
 function fetchWeeklyForecast(apiKey, county, district) {
   const base      = COUNTY_TO_DATASET[county] || COUNTY_TO_DATASET[DEFAULT_COUNTY];
   const num       = parseInt(base.replace('F-D0047-', ''));
@@ -444,7 +471,7 @@ function fetchWeeklyForecast(apiKey, county, district) {
   const url = 'https://opendata.cwa.gov.tw/api/v1/rest/datastore/' + datasetId
     + '?Authorization=' + apiKey
     + '&locationName=' + encodeURIComponent(district)
-    + '&elementName=' + encodeURIComponent('天氣現象,降雨機率,12小時降雨機率');
+    + '&elementName=' + encodeURIComponent('天氣現象,降雨機率,12小時降雨機率,最高體感溫度,最低體感溫度,紫外線指數');
 
   const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   const data     = JSON.parse(response.getContentText());
@@ -457,29 +484,66 @@ function fetchWeeklyForecast(apiKey, county, district) {
 
   const elMap = {};
   location.WeatherElement.forEach(e => { elMap[e.ElementName] = e.Time; });
-  Logger.log('fetchWeeklyForecast elements: ' + Object.keys(elMap).join(', '));
+  Logger.log('fetchWeeklyForecast elementNames: ' + Object.keys(elMap).join(', '));
+  ['最高體感溫度', '最低體感溫度', '紫外線指數'].forEach(n => {
+    if (elMap[n] && elMap[n][0]) Logger.log(n + ' 首筆 ElementValue keys: ' + JSON.stringify(Object.keys(elMap[n][0].ElementValue[0] || {})));
+  });
 
   const daily = {};
 
-  // 7-day API uses 「12小時降雨機率」; 3-day uses 「降雨機率」 — try both
+  // 7 天版欄位名為「12小時降雨機率」，3 天版為「降雨機率」，兩者都試
   (elMap['12小時降雨機率'] || elMap['降雨機率'] || []).forEach(t => {
     const dt   = new Date(t.StartTime);
     const date = Utilities.formatDate(dt, 'Asia/Taipei', 'yyyy-MM-dd');
     const val  = parseInt((t.ElementValue[0] || {}).ProbabilityOfPrecipitation);
     if (isNaN(val)) return;
-    if (!daily[date]) daily[date] = { maxPop: 0, wx: null };
+    if (!daily[date]) daily[date] = { maxPop: 0, wx: null, maxFeelsLike: null, minFeelsLike: null, uvIndex: null, uvExposureLevel: null };
     if (val > daily[date].maxPop) daily[date].maxPop = val;
   });
 
-  // Use 06:00 slot as representative weather for each day
+  // 只取白天（06:00）時段的天氣現象作代表
   (elMap['天氣現象'] || []).forEach(t => {
     const dt   = new Date(t.StartTime);
     const date = Utilities.formatDate(dt, 'Asia/Taipei', 'yyyy-MM-dd');
     const hour = parseInt(Utilities.formatDate(dt, 'Asia/Taipei', 'HH'));
     if (hour !== 6) return;
     const wx = (t.ElementValue[0] || {}).Weather;
-    if (!daily[date]) daily[date] = { maxPop: 0, wx: null };
+    if (!daily[date]) daily[date] = { maxPop: 0, wx: null, maxFeelsLike: null, minFeelsLike: null, uvIndex: null, uvExposureLevel: null };
     if (wx) daily[date].wx = wx;
+  });
+
+  // 最高體感溫度（取每日最大值）
+  (elMap['最高體感溫度'] || []).forEach(t => {
+    const dt   = new Date(t.StartTime);
+    const date = Utilities.formatDate(dt, 'Asia/Taipei', 'yyyy-MM-dd');
+    const val  = parseInt(Object.values(t.ElementValue[0] || {})[0]);
+    if (isNaN(val)) return;
+    if (!daily[date]) daily[date] = { maxPop: 0, wx: null, maxFeelsLike: null, minFeelsLike: null, uvIndex: null, uvExposureLevel: null };
+    if (daily[date].maxFeelsLike === null || val > daily[date].maxFeelsLike) daily[date].maxFeelsLike = val;
+  });
+
+  // 最低體感溫度（取每日最小值）
+  (elMap['最低體感溫度'] || []).forEach(t => {
+    const dt   = new Date(t.StartTime);
+    const date = Utilities.formatDate(dt, 'Asia/Taipei', 'yyyy-MM-dd');
+    const val  = parseInt(Object.values(t.ElementValue[0] || {})[0]);
+    if (isNaN(val)) return;
+    if (!daily[date]) daily[date] = { maxPop: 0, wx: null, maxFeelsLike: null, minFeelsLike: null, uvIndex: null, uvExposureLevel: null };
+    if (daily[date].minFeelsLike === null || val < daily[date].minFeelsLike) daily[date].minFeelsLike = val;
+  });
+
+  // 紫外線指數（取每日最大值；同步記錄 CWA 官方等級文字）
+  (elMap['紫外線指數'] || []).forEach(t => {
+    const dt    = new Date(t.StartTime);
+    const date  = Utilities.formatDate(dt, 'Asia/Taipei', 'yyyy-MM-dd');
+    const obj   = t.ElementValue[0] || {};
+    const val   = parseInt(obj.UVIndex);
+    if (isNaN(val)) return;
+    if (!daily[date]) daily[date] = { maxPop: 0, wx: null, maxFeelsLike: null, minFeelsLike: null, uvIndex: null, uvExposureLevel: null };
+    if (daily[date].uvIndex === null || val > daily[date].uvIndex) {
+      daily[date].uvIndex         = val;
+      daily[date].uvExposureLevel = obj.UVExposureLevel || null;
+    }
   });
 
   return daily;
@@ -492,7 +556,6 @@ function fetchWeatherBySlot(apiKey, dateStr, county, district) {
     + '&locationName=' + encodeURIComponent(district)
     + '&elementName=' + encodeURIComponent('3小時降雨機率,天氣現象');
 
-  Logger.log('fetchWeatherBySlot: ' + county + ' ' + district + ' ' + dateStr);
   const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   const data = JSON.parse(response.getContentText());
   if (data.success !== 'true') return { pop: {}, wx: {} };
@@ -522,7 +585,7 @@ function fetchWeatherBySlot(apiKey, dateStr, county, district) {
   };
 }
 
-// slotSize: 3 for pop, 6 for wx
+// slotSize: pop 用 3，wx 用 6
 function getAtSlot(map, hour, slotSize) {
   const slotHour = Math.floor(hour / slotSize) * slotSize;
   return map[slotHour] !== undefined ? map[slotHour] : null;
@@ -543,9 +606,10 @@ function sendLineMessage(token, userId, message) {
   });
 }
 
-// ── First-time setup: run once to create all triggers ──
+// ── 初次設定：執行一次即可，之後由自排觸發器接力 ──────────────
 function setupTriggers() {
-  ['notifyEvening', 'notifyMorning', 'notifyWeekly'].forEach(fn => {
+  // 清除所有舊觸發器
+  ['notifyEveningSnapshot', 'notifyEveningCheck', 'notifyEvening', 'notifyMorning', 'notifyWeekly', 'notifyDailySchedule'].forEach(fn => {
     ScriptApp.getProjectTriggers()
       .filter(t => t.getHandlerFunction() === fn)
       .forEach(t => ScriptApp.deleteTrigger(t));
@@ -553,29 +617,75 @@ function setupTriggers() {
 
   const now = new Date();
 
-  // 20:00 today (or tomorrow if already past)
+  // 今晚 20:00（若已過則排到明晚）
   const evening = new Date(now);
   evening.setHours(20, 0, 0, 0);
   if (evening <= now) evening.setDate(evening.getDate() + 1);
   ScriptApp.newTrigger('notifyEvening').timeBased().at(evening).create();
 
-  // 05:00 tomorrow
+  // 明早 05:00
   const morning = new Date(now);
   morning.setDate(morning.getDate() + 1);
   morning.setHours(5, 0, 0, 0);
   ScriptApp.newTrigger('notifyMorning').timeBased().at(morning).create();
 
-  // Next Sunday 20:00
+  // 下一個週日 20:00
   const sunday = new Date(now);
   const daysUntilSunday = (7 - now.getDay()) % 7 || 7;
   sunday.setDate(sunday.getDate() + daysUntilSunday);
   sunday.setHours(20, 0, 0, 0);
   ScriptApp.newTrigger('notifyWeekly').timeBased().at(sunday).create();
 
-  Logger.log('Triggers set:\n  notifyEvening @ ' + evening + '\n  notifyMorning @ ' + morning + '\n  notifyWeekly @ ' + sunday);
+  Logger.log('觸發器設定完成：\n  notifyEvening @ ' + evening + '\n  notifyMorning @ ' + morning + '\n  notifyWeekly @ ' + sunday);
 }
 
-// ── Debug: test location parsing logic ──
+// 測試所有天氣顯示情境，在 Logger 確認 emoji 與訊息格式
+function debugTestWeatherDisplay() {
+  const cases = [
+    { title: '晨跑',    pop: 70,  wx: '陰短暫雨',  expect: '🌧70%' },
+    { title: '晨跑',    pop: 25,  wx: '多雲短暫雨', expect: '🌦25%' },
+    { title: '晨跑',    pop: 10,  wx: '晴',         expect: '☀️' },
+    { title: '晨跑',    pop: 10,  wx: '晴時多雲',   expect: '🌤️' },
+    { title: '晨跑',    pop: 10,  wx: '多雲',        expect: '⛅' },
+    { title: '晨跑',    pop: 10,  wx: '多雲時陰',   expect: '⛅' },
+    { title: '晨跑',    pop: 10,  wx: '陰',          expect: '☁️' },
+    { title: '晨跑',    pop: 10,  wx: null,          expect: '（無天氣資料）' },
+    { title: '線上會議', pop: null, wx: null,         expect: '（室內，不顯示）' },
+  ];
+
+  const lines = ['=== debugTestWeatherDisplay (v1.11.0) ==='];
+  cases.forEach(c => {
+    let display;
+    if (c.pop === null) {
+      display = c.title + '（室內事件）';
+    } else if (c.pop > 30) {
+      display = c.title + ' 🌧' + c.pop + '%';
+    } else if (c.pop > 15) {
+      display = c.title + ' 🌦' + c.pop + '%';
+    } else {
+      const emoji = wxToEmoji(c.wx);
+      display = c.title + (emoji ? ' ' + emoji : '');
+    }
+    lines.push('[期望: ' + c.expect + '] → ' + display);
+  });
+  Logger.log(lines.join('\n'));
+}
+
+// 印出 Locations[0] 所有頂層欄位名，確認 issueTime 欄位存在
+function debugCheckIssueTime() {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('CWA_API_KEY');
+  const url = 'https://opendata.cwa.gov.tw/api/v1/rest/datastore/' + COUNTY_TO_DATASET[DEFAULT_COUNTY]
+    + '?Authorization=' + apiKey
+    + '&locationName=' + encodeURIComponent(DEFAULT_DISTRICT)
+    + '&elementName=' + encodeURIComponent('3小時降雨機率');
+
+  const data = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText());
+  const loc0 = (data.records.Locations || [{}])[0];
+  Logger.log('Locations[0] 所有欄位: ' + JSON.stringify(Object.keys(loc0)));
+  Logger.log('issueTime: ' + loc0.issueTime);
+}
+
+// 測試地點解析邏輯（貼上事件的 location 欄位或標題，確認解析結果）
 function debugTestLocationParsing() {
   const cases = [
     '台南市東區民族路三段1號',
@@ -584,26 +694,33 @@ function debugTestLocationParsing() {
     '台南行',
     '宜蘭出差',
     '台北市信義區',
-    '116台灣臺北市文山區木柵路三段96號B1',
-    'World Gym Express 台北木柵店\n116台灣臺北市文山區木柵路三段96號B1',
-    '', null,
+    '116台灣臺北市文山區木柵路三段96號B1',          // 應為 臺北市文山區（非中正區）
+    'World Gym Express 台北木柵店\n116台灣臺北市文山區木柵路三段96號B1', // 同上
+    '',
+    null,
   ];
+
   const lines = ['=== debugTestLocationParsing ==='];
   cases.forEach(text => {
     const result = parseLocation(text);
-    lines.push(result
-      ? JSON.stringify(text) + ' → ' + result.county + ' ' + result.district + ' label=' + result.label
-      : JSON.stringify(text) + ' → null (using DEFAULT_DISTRICT)');
+    if (result) {
+      lines.push(JSON.stringify(text) + ' → ' + result.county + ' ' + result.district + ' label=' + result.label);
+    } else {
+      lines.push(JSON.stringify(text) + ' → null（使用預設文山區）');
+    }
   });
   Logger.log(lines.join('\n'));
 }
 
-// ── Debug: list recent 30-day events to tune OUTDOOR_KEYWORDS ──
+// 執行後在 Logger 查看近 30 天事件標題，貼給 CC 歸納戶外關鍵詞
 function debugListRecentEvents() {
   const calendar = CalendarApp.getCalendarById(CALENDAR_ID);
   const start    = new Date();
   start.setDate(start.getDate() - 30);
   const events   = calendar.getEvents(start, new Date());
-  const output   = events.map(e => e.getTitle() + (e.getLocation() ? ' [loc: ' + e.getLocation() + ']' : ''));
-  Logger.log('Events in last 30 days (' + events.length + '):\n' + output.join('\n'));
+
+  const output = events.map(e =>
+    e.getTitle() + (e.getLocation() ? ' [地點: ' + e.getLocation() + ']' : '')
+  );
+  Logger.log('近 30 天事件（' + events.length + ' 筆）：\n' + output.join('\n'));
 }
